@@ -1,0 +1,104 @@
+# ==============================================================================
+# Python & Virtual Environments
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+.env
+.env.*
+!.env.example
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ==============================================================================
+# Models, Embeddings & Local Model Cache
+# ==============================================================================
+backend/models/
+*.bin
+*.onnx
+*.pt
+*.pth
+*.safetensors
+*.gguf
+
+# Vector DB & Caches
+chroma_db/
+.chroma_db/
+backend/chroma_db/
+backend/cache/
+*.sqlite3
+*.sqlite3-journal
+*.db
+*.pkl
+
+# ==============================================================================
+# Ingested Data & Documents
+# ==============================================================================
+backend/data/*
+!backend/data/.gitkeep
+backend/data/pdf/*
+!backend/data/pdf/.gitkeep
+backend/data/docx/*
+!backend/data/docx/.gitkeep
+backend/data/txt/*
+!backend/data/txt/.gitkeep
+backend/data/csv/*
+!backend/data/csv/.gitkeep
+
+# ==============================================================================
+# Logs & Temporary Files
+# ==============================================================================
+*.log
+backend/logs/
+*.tmp
+*.temp
+
+# ==============================================================================
+# IDEs & Editors
+# ==============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+
+# ==============================================================================
+# OS Generated Files
+# ==============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ==============================================================================
+# Frontend & Node Artifacts
+# ==============================================================================
+node_modules/
+.streamlit/secrets.toml

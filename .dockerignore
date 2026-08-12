@@ -1,0 +1,14 @@
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.git/
+.gitignore
+README.md
+.env
+chroma_db/
+cache/
+*.log
+.DS_Store
+Thumbs.db
