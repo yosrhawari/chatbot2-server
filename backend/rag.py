@@ -2,11 +2,13 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+import re
 from typing import List
 from pathlib import Path
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.documents import Document
 from langchain_classic.retrievers import ContextualCompressionRetriever
 
 from config import (
@@ -15,7 +17,7 @@ from config import (
     MAX_CONTEXT_CHARS,
 )
 
-from ingest import get_vectorstore
+from ingest import get_vectorstore, normalize_arabic_query, chapter_hint, chapter_reference
 from session import ConversationMemory
 
 from models import (
@@ -56,18 +58,23 @@ condense_prompt = ChatPromptTemplate.from_messages([
 query_condenser = condense_prompt | llm_client | StrOutputParser()
 
 # ── QA Answering Chain ────────────────────────────────────────────────────────
-# Condensed to the four rules that matter most for a small model:
-# grounding, no hallucination, source citation, French output.
+# Condensed to the rules that matter most for a small model:
+# grounding, no hallucination, direct structured style, source citation,
+# French output.
 qa_prompt = ChatPromptTemplate.from_messages([
     ("system",
      "Tu es un assistant commercial. Règles strictes:\n"
-     "1. Réponds TOUJOURS en français, même si la question est en anglais.\n"
+     "1. Réponds TOUJOURS en français, même si la question ou le contexte est "
+     "en arabe: traduis alors l'essentiel en français.\n"
      "2. Réponds UNIQUEMENT avec les informations du contexte fourni.\n"
-     "3. Si la réponse est absente du contexte, réponds exactement: "
+     "3. Commence DIRECTEMENT par un titre en gras (ex: **...**) puis des "
+     "puces concises. N'écris AUCUNE phrase d'introduction (pas de «compte "
+     "tenu», «d'après le document») ni de conclusion (pas de «il convient de "
+     "noter», «il est important de souligner»).\n"
+     "4. Cite la source entre crochets après chaque fait, ex: [document.pdf].\n"
+     "5. Si la réponse est absente du contexte, réponds exactement: "
      "\"Je suis désolé, mais la documentation ne contient pas les informations "
      "nécessaires pour répondre à cette question.\"\n"
-     "4. Cite la source entre crochets après chaque fait, ex: [document.pdf].\n"
-     "5. Sois concis et utilise des puces.\n"
      "6. N'affiche jamais de JSON brut ni de blocs de code."),
     ("user",
      "Historique:\n{history}\n\nContexte:\n{context}\n\n"
@@ -127,6 +134,39 @@ def retrieve_documents(query: str) -> List:
     return compression_retriever.invoke(query)
 
 
+def _build_search_terms(condensed_query: str) -> List[str]:
+    """Search terms for retrieval, best first.
+
+    The condensed query is Arabic-normalised so it matches the repaired
+    Arabic index. A canonical chapter reference («الفصل9 1» → «الفصل 9»)
+    becomes the primary term so glued digits and stray numbers do not pollute
+    the embedding. When the query references a numbered chapter/article, a
+    term with a French hint is appended so the French copy of the document
+    also surfaces (the reranker picks the relevant chunks either way).
+    """
+    normalized = normalize_arabic_query(condensed_query)
+    canonical = chapter_reference(normalized)
+    terms = [canonical or normalized]
+    if canonical and canonical != normalized:
+        terms.append(normalized)
+    hint = chapter_hint(normalized)
+    if hint:
+        terms.append(f"{terms[0]} {hint}")
+    return terms
+
+
+def _dedupe_documents(primary, secondary):
+    seen = set()
+    merged = []
+    for doc in list(primary) + list(secondary):
+        key = (doc.metadata.get("source", ""), doc.page_content)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(doc)
+    return merged
+
+
 def _build_context(reranked_docs):
     """Concatenate chunks up to a character budget.
 
@@ -149,6 +189,87 @@ def _build_context(reranked_docs):
     return "\n\n".join(parts), used
 
 
+def _priority_sort_for_chapter(docs, marker_parts):
+    """Put chunks containing a requested chapter/article marker first.
+
+    Numbered references («الفصل 9») match both the Arabic marker line
+    («الفصل 9 …») and its French equivalent («ARTICLE 9. …») in the parallel
+    copy. Boosting them above adjacent chapters keeps the small model focused
+    on the requested content. Stable: the reranker order is preserved within
+    each group.
+    """
+    if not docs or not marker_parts:
+        return docs
+    hits = [i for i, doc in enumerate(docs) if any(m in doc.page_content for m in marker_parts)]
+    if not hits:
+        return docs
+    hit_set = set(hits)
+    return [docs[i] for i in hits] + [docs[i] for i in range(len(docs)) if i not in hit_set]
+
+
+def _chapter_markers(condensed_query: str) -> List[str]:
+    """Marker substrings that identify the requested chapter/article in both
+    language copies, e.g. «الفصل 9» → ['الفصل 9', 'ARTICLE 9.', 'article 9']."""
+    canon = chapter_reference(normalize_arabic_query(condensed_query))
+    if not canon:
+        return []
+    m = re.match(r"^([^\d\s]+)\s+(\d+)$", canon)
+    if not m:
+        return []
+    label, num = m.groups()
+    markers = [canon]
+    if label in ("الفصل", "فصل"):
+        markers.append(f"ARTICLE {num}.")
+        markers.append(f"ARTICLE {num}\n")
+        markers.append(f"article {num}")
+    else:
+        markers.append(f"chapitre {num}")
+    return markers
+
+
+def _chapter_lookup_chunks(markers: List[str]) -> List:
+    """Fetch stored chunks matching a numbered chapter/article marker.
+
+    Semantic retrieval can miss the exact section when embeddings blur
+    adjacent chapters, so for numbered references we also scan the (small)
+    collection directly. A marker chunk is included together with the chunk
+    that follows it in the source, which usually carries the section body
+    (e.g. the «الفصل 9 تسبيقات على العقد» header precedes the advances
+    details).
+    """
+    if not markers:
+        return []
+    data = vectorstore.get(include=["documents", "metadatas"])
+    contents = data.get("documents") or []
+    metas = data.get("metadatas") or []
+    matching = [i for i, c in enumerate(contents) if any(m in c for m in markers)]
+    indices = set(matching)
+    # The successor chunk (next in the same source) also belongs to the section.
+    for i in matching:
+        src = (metas[i] or {}).get("source")
+        for j in range(i + 1, len(contents)):
+            if (metas[j] or {}).get("source") != src:
+                break
+            indices.add(j)
+            break
+    # Section-body chunks (marker near the start, e.g. «ARTICLE 9. AVANCES…»)
+    # come first: the small model then grounds its answer on the section
+    # content instead of the previous chapter's spillover.
+    ordered = sorted(
+        indices,
+        key=lambda i: (
+            # Arabic marker line «الفصل N …» is also a body start; a French
+            # body chunk (marker right after the prefix) leads either way.
+            0 if any(m in contents[i][:80] for m in markers) else 1,
+            i,
+        ),
+    )
+    return [
+        Document(page_content=contents[i], metadata=metas[i] or {})
+        for i in ordered
+    ]
+
+
 def retrieve_context(query: str, history: str = "", condensed_query: str = None) -> dict:
     # Reuse a caller-supplied condensed query (e.g. the router already computed
     # it for cache keying) to avoid a second condensation LLM call.
@@ -157,7 +278,32 @@ def retrieve_context(query: str, history: str = "", condensed_query: str = None)
 
     logger.info(f"[RAG] Condensed query: {condensed_query}")
 
-    reranked_docs = retrieve_documents(condensed_query)
+    terms = _build_search_terms(condensed_query)
+    if len(terms) == 1:
+        reranked_docs = retrieve_documents(terms[0])
+    else:
+        # Two search terms: retrieve both raw lists, merge, then rerank once
+        # so the bilingual candidates compete fairly for the top slots.
+        merged = _dedupe_documents(
+            base_retriever.invoke(terms[0]),
+            base_retriever.invoke(terms[1]),
+        )
+        reranked_docs = reranker_compressor.compress_documents(merged, terms[0])
+
+    # Numbered chapter references get their marker chunks promoted to the
+    # front of the context so adjacent chapters do not dominate the answer.
+    # Direct lookup guarantees the section body is present even when the
+    # embeddings blur it; the reranked candidates fill the remaining budget.
+    markers = _chapter_markers(condensed_query)
+    if markers:
+        lookup = _chapter_lookup_chunks(markers)
+        reranked_docs = _priority_sort_for_chapter(reranked_docs, markers)
+        reranked_docs = lookup + [
+            d for d in reranked_docs
+            if all(l.page_content != d.page_content for l in lookup)
+        ]
+        logger.info(f"[RAG] Chapter priority markers: {markers} ({len(lookup)} direct hits)")
+
     context, used_docs = _build_context(reranked_docs)
 
     return {

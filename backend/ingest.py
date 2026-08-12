@@ -4,6 +4,8 @@ logger = logging.getLogger(__name__)
 
 import json
 import hashlib
+import re
+import unicodedata
 from pathlib import Path
 
 import pandas as pd
@@ -203,8 +205,144 @@ def get_vectorstore():
     return _vectorstore
 
 
+_arabic_lower = 0x0600
+_arabic_upper = 0x06FF
+
+_ARABIC_DIACRITICS = re.compile(r"[\u064B-\u0652\u0670\u0640]")
+_ALEF_VARIANTS = str.maketrans("أإآٱ", "اااا")
+# NFKC keeps Arabic-Indic digits (٠-٩) as-is; map them to ASCII explicitly.
+_ARABIC_INDIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+_PRESENTATION_FORMS = re.compile(r"[\uFB50-\uFDFF\uFE70-\uFEFF]")
+
+_CHAPTER_PATTERN = re.compile(
+    r"(الفصل|فصل|المادة|باب|chapitre|article|section)\s*(ال)?\s*(\d{1,3})",
+    re.IGNORECASE,
+)
+
+
+def _is_arabic_char(c: str) -> bool:
+    """Base Arabic block plus the presentation-form ranges that PDF
+    extraction substitutes for shaped letters."""
+    return (
+        _arabic_lower <= ord(c) <= _arabic_upper
+        or "\uFB50" <= c <= "\uFDFF"
+        or "\uFE70" <= c <= "\uFEFF"
+    )
+
+
+def _arabic_ratio(line: str) -> float:
+    """Share of non-whitespace characters that are Arabic."""
+    chars = [c for c in line if not c.isspace()]
+    if not chars:
+        return 0.0
+    return sum(1 for c in chars if _is_arabic_char(c)) / len(chars)
+
+
+def has_arabic(text: str) -> bool:
+    """True if the text contains any Arabic character (base or shaped)."""
+    return any(_is_arabic_char(c) for c in text)
+
+
+def normalize_arabic_query(query: str) -> str:
+    """Normalise Arabic in a query to match indexed content.
+
+    Strips diacritics and tatweel, unifies alef/hamza variants (أإآ → ا),
+    ة → ه and ى → ي, converts Arabic-Indic digits (٠-٩) to ASCII and
+    collapses whitespace. Non-Arabic text passes through essentially unchanged.
+    """
+    s = unicodedata.normalize("NFKC", query or "")
+    s = _ARABIC_DIACRITICS.sub("", s)
+    s = s.translate(_ALEF_VARIANTS)
+    s = s.translate(_ARABIC_INDIC_DIGITS)
+    s = s.replace("ة", "ه").replace("ى", "ي")
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def chapter_reference(query: str) -> str:
+    """Canonical Arabic chapter/article reference of a query, e.g. «الفصل 9».
+
+    Normalises glued forms like «الفصل9» to «الفصل 9» so the semantic search
+    term is clean. Returns "" when the query is not Arabic or has no numbered
+    chapter/article reference (French queries retrieve the French copy
+    directly).
+    """
+    m = _CHAPTER_PATTERN.search(query or "")
+    if not m or not has_arabic(query):
+        return ""
+    label, _article, num = m.groups()
+    return f"{label} {num}"
+
+
+def chapter_hint(query: str) -> str:
+    """Return a French retrieval hint for a numbered chapter/article reference.
+
+    E.g. «الفصل 9» produces "chapitre 9 article 9" so the French copy of the
+    contract is retrieved alongside the Arabic one. Returns "" for queries
+    without a chapter/article reference or already in French.
+    """
+    hits = _CHAPTER_PATTERN.findall(query or "")
+    if not hits or not has_arabic(query):
+        return ""
+    parts = []
+    for _label, _article, num in hits:
+        parts.append(f"chapitre {num}")
+        parts.append(f"article {num}")
+    return " ".join(parts)
+
+
+def _in_visual_order(line: str, tokens: list) -> bool:
+    """Heuristic: is an Arabic line stored in reversed (visual) order?
+
+    Shaped presentation forms (FB50-FDFF / FE70-FEFF) only survive PDF
+    extraction of RTL text, so their presence is a strong signal. Otherwise
+    check for a numeral token that appears before any Arabic token, which is
+    how visual order prints «9 الفصل» for the logical «الفصل 9».
+    """
+    if _PRESENTATION_FORMS.search(line):
+        return True
+    for token in tokens:
+        if token and token[0].isdigit():
+            if not has_arabic(token):
+                return True
+        if has_arabic(token):
+            return False
+    return False
+
+
+def fix_arabic_text(text: str, threshold: float = 0.40) -> str:
+    """Rebuild logical-order Arabic from reversed visual-order PDF extraction.
+
+    PyPDF emits Arabic in display (visual) order: words appear left-to-right
+    in reverse logical order and often in presentation (shaped) forms, e.g.
+    ``العقد على تسبيقات. 9 الفصل`` for «الفصل 9. تسبيقات على العقد». Reversing
+    the token order and NFKC-normalising the shaped forms restores readable
+    logical text that embeds correctly. Lines already in logical order and
+    non-Arabic lines pass through untouched; Arabic-Indic digits are mapped to
+    ASCII so chapter references match query-side normalisation.
+    """
+    if not text:
+        return text
+    lines = []
+    for line in text.splitlines():
+        if _arabic_ratio(line) < threshold:
+            lines.append(line)
+            continue
+        tokens = line.split()
+        if _in_visual_order(line, tokens):
+            source = " ".join(reversed(tokens))
+        else:
+            source = line
+        normalized = unicodedata.normalize("NFKC", source)
+        normalized = normalized.translate(_ARABIC_INDIC_DIGITS)
+        lines.append(normalized)
+    return "\n".join(lines)
+
+
 def load_pdf(file_path):
-    return PyPDFLoader(str(file_path)).load()
+    docs = PyPDFLoader(str(file_path)).load()
+    for doc in docs:
+        doc.page_content = fix_arabic_text(doc.page_content)
+    return docs
 
 
 def load_docx(file_path):
