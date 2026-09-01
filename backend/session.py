@@ -1,16 +1,7 @@
 import threading
 from collections import deque, OrderedDict
 
-from config import MEMORY_SIZE, MAX_SESSIONS
-
-# Character budget for the history string returned by get_history().
-# A turn cap alone is not enough: a single very long user paste or assistant
-# answer can blow past the small model's context window even within the turn
-# limit. We therefore ALSO cap the rendered history by characters.
-try:
-    from config import HISTORY_MAX_CHARS
-except ImportError:
-    HISTORY_MAX_CHARS = 2000
+from config import MEMORY_SIZE, MAX_SESSIONS, HISTORY_MAX_CHARS
 
 
 class ConversationMemory:

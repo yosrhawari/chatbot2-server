@@ -23,6 +23,7 @@ from config import (
     PDF_DIR,
     DOCX_DIR,
     TXT_DIR,
+    MD_DIR,
     CSV_DIR,
     CHROMA_DIR,
     CHUNK_SIZE,
@@ -356,6 +357,10 @@ def load_txt(file_path):
         return TextLoader(str(file_path), encoding="latin-1").load()
 
 
+def load_markdown(file_path):
+    return load_txt(file_path)
+
+
 def load_document(file_path):
     suffix = file_path.suffix.lower()
     if suffix == ".pdf":
@@ -364,22 +369,143 @@ def load_document(file_path):
         return load_docx(file_path)
     if suffix == ".txt":
         return load_txt(file_path)
+    if suffix == ".md":
+        return load_markdown(file_path)
     return []
 
-#CHUNK DOCUMENTS
-def chunk_documents(documents):
-    chunks = text_splitter.split_documents(documents)
-    cleaned = []
-    for chunk in chunks:
-        content = (chunk.page_content or "").strip()
-        if len(content) < MIN_CHUNK_CHARS:
+
+# ── Article-aware chunking ──────────────────────────────────────────────────
+# The HAYETT 2000 contract documents are organised in numbered articles
+# (French: "ARTICLE N. TITRE", Arabic: "الفصل N ..." / "المادة N ..."). Chunks
+# must keep the article number AND its verbatim title in their metadata so the
+# RAG answer can cite the exact article title without the LLM inventing one.
+
+_ARTICLE_PATTERN_FR = re.compile(
+    r"^(?:\*\*)?\s*ARTICLE\s+(\d{1,3})\s*[.:\-—]?\s*(.*?)\s*(?:\*\*)?$",
+    re.IGNORECASE,
+)
+_ARTICLE_PATTERN_AR = re.compile(r"^(الفصل|المادة)\s+(\d{1,3})\s*(.*)$")
+
+
+def find_article_markers(full_text: str) -> list:
+    """Return [(line_index, article, title, language)] in document order.
+
+    French markers start at ``ARTICLE N``; Arabic markers are full lines like
+    ``الفصل 10 ...`` whose verbatim line becomes the title.
+    """
+    markers = []
+    for i, raw in enumerate(full_text.splitlines()):
+        stripped = raw.strip()
+        if not stripped:
             continue
-        chunk.page_content = content
-        src = chunk.metadata.get("source", "")
-        if src:
-            chunk.metadata["source"] = Path(src).name
-        cleaned.append(chunk)
-    return cleaned
+        m = _ARTICLE_PATTERN_FR.match(stripped)
+        if m:
+            title = (m.group(2) or "").strip()
+            markers.append((i, f"ARTICLE {m.group(1)}", title or f"ARTICLE {m.group(1)}", "fr"))
+            continue
+        m = _ARTICLE_PATTERN_AR.match(stripped)
+        if m:
+            markers.append((i, f"{m.group(1)} {m.group(2)}", stripped, "ar"))
+    return markers
+
+
+def split_article_sections(full_text: str, markers) -> list:
+    """Split the full text into sections, one per article marker.
+
+    Returns list of dicts: {article, title, language, text}. A section starts
+    at its marker line and runs until the next marker. Text before the first
+    marker (preamble) is dropped: it belongs to no article.
+    """
+    if not markers or not full_text:
+        return []
+    lines = full_text.splitlines()
+    sections = []
+    for idx, (start, article, title, language) in enumerate(markers):
+        end = markers[idx + 1][0] if idx + 1 < len(markers) else len(lines)
+        text = "\n".join(lines[start:end]).strip()
+        if not text:
+            continue
+        sections.append(
+            {
+                "article": article,
+                "title": title,
+                "language": language,
+                "text": text,
+            }
+        )
+    return sections
+
+
+def _dedupe_by_stem_match() -> set:
+    """Return TXT stems that already exist as Markdown documents.
+
+    ``conditions_générales.md`` (data/md) is the canonical HAYETT French
+    source; the duplicated .txt sibling must not be indexed twice.
+    """
+    md_stems = {Path(p).stem.casefold() for p in Path(MD_DIR).glob("*.md") if p.is_file()}
+    return md_stems
+
+def _detect_document_language(text: str) -> str:
+    """Best-effort language label for documents without article markers."""
+    return "ar" if has_arabic(text) else "fr"
+
+
+def chunk_documents(documents):
+    """Chunk documents into LangChain Documents with provenance metadata.
+
+    Documents organised in numbered articles (HAYETT contract files) are
+    split per article; every chunk carries {source, article, title, language}
+    with the title copied VERBATIM from the document. Documents without an
+    article structure keep the previous generic chunking, tagged by language.
+    """
+    chunks = []
+
+    # Group loader output by source file so multi-page PDFs are chunked as one.
+    by_source = {}
+    for doc in documents:
+        src = doc.metadata.get("source", "unknown")
+        by_source.setdefault(src, []).append(doc)
+
+    for src, docs in by_source.items():
+        full_text = "\n".join((d.page_content or "") for d in docs).strip()
+        if not full_text:
+            continue
+
+        markers = find_article_markers(full_text)
+        if markers:
+            language = markers[0][3]
+            sections = split_article_sections(full_text, markers)
+            logger.info(
+                f"[INFO] {Path(src).name}: {len(sections)} article sections "
+                f"({language})"
+            )
+            for section in sections:
+                for piece in text_splitter.split_text(section["text"]):
+                    piece = piece.strip()
+                    if len(piece) < MIN_CHUNK_CHARS:
+                        continue
+                    chunks.append(
+                        Document(
+                            page_content=piece,
+                            metadata={
+                                "source": Path(src).name,
+                                "article": section["article"],
+                                "title": section["title"],
+                                "language": section["language"],
+                            },
+                        )
+                    )
+        else:
+            language = _detect_document_language(full_text)
+            for chunk in text_splitter.split_documents(docs):
+                content = (chunk.page_content or "").strip()
+                if len(content) < MIN_CHUNK_CHARS:
+                    continue
+                chunk.page_content = content
+                chunk.metadata["source"] = Path(src).name
+                chunk.metadata["language"] = language
+                chunks.append(chunk)
+    return chunks
 
 
 def _deterministic_ids(chunks):
@@ -404,10 +530,16 @@ def _deterministic_ids(chunks):
 def ingest_documents():
     vectorstore = get_vectorstore()
     documents = []
+    skip_txt_stems = _dedupe_by_stem_match()
 
-    for folder in [PDF_DIR, DOCX_DIR, TXT_DIR]:
+    for folder in [PDF_DIR, DOCX_DIR, TXT_DIR, MD_DIR]:
         for file_path in Path(folder).glob("*"):
             if not file_path.is_file():
+                continue
+            # A .txt duplicate of a canonical .md (e.g. conditions générales)
+            # must not be indexed twice.
+            if folder == TXT_DIR and file_path.stem.casefold() in skip_txt_stems:
+                logger.info(f"[INFO] Skipping {file_path.name}: duplicate of a Markdown file.")
                 continue
             logger.info(f"[INFO] Loading: {file_path.name}")
             try:
@@ -429,9 +561,14 @@ def ingest_documents():
 
     ids = _deterministic_ids(chunks)
     logger.info(f"[INFO] Generated {len(chunks)} chunks")
-    # Delete existing entries with the same stable ids first so re-ingestion
-    # does not raise DuplicateIDError.  Chroma's delete is idempotent.
-    vectorstore.delete(ids=ids)
+    # Delete existing entries belonging to the re-ingested sources first, so
+    # stale chunks (from an older chunking layout) never accumulate.
+    sources = sorted({c.metadata.get("source", "unknown") for c in chunks})
+    for source in sources:
+        try:
+            vectorstore.delete(where={"source": source})
+        except Exception as e:
+            logger.warning(f"[WARN] Bulk delete for {source} failed: {e}")
     vectorstore.add_documents(chunks, ids=ids)
     logger.info("[INFO] Documents indexed.")
 

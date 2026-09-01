@@ -1,4 +1,4 @@
-# 🤖 Vilavi Chatbot
+# 🤖 Comar Chatbot
 
 > A business intelligence chatbot combining Retrieval-Augmented Generation (RAG) with structured data analytics. Built with FastAPI, LangChain, and Streamlit.
 
@@ -32,7 +32,7 @@
 
 ## Overview
 
-Vilavi Chatbot enables natural language querying over both unstructured documents and structured data. It automatically routes questions to the right engine — semantic document search, pandas-powered analytics, or a hybrid of both — and returns answers in French with inline source citations.
+Comar Chatbot enables natural language querying over both unstructured documents and structured data. It automatically routes questions to the right engine — semantic document search, pandas-powered analytics, or a hybrid of both — and returns answers in French with inline source citations.
 
 ---
 

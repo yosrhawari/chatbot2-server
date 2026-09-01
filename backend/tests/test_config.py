@@ -6,10 +6,10 @@ import config
 
 class TestConfigDefaults:
     def test_app_name(self):
-        assert config.APP_NAME == "Vilavi Chatbot"
+        assert config.APP_NAME == "Comar Chatbot"
 
     def test_app_version(self):
-        assert config.APP_VERSION == "2.8.1"
+        assert config.APP_VERSION == "2.9.0"
 
     def test_host_default(self):
         assert config.HOST == "0.0.0.0"
@@ -21,7 +21,7 @@ class TestConfigDefaults:
         assert config.MODEL_NAME == "qwen2.5:3b"
 
     def test_embedding_model_name(self):
-        assert config.EMBEDDING_MODEL_NAME == "intfloat/multilingual-e5-large"
+        assert config.EMBEDDING_MODEL_NAME == "intfloat/multilingual-e5-small"
 
     def test_reranker_model_name(self):
         assert config.RERANKER_MODEL_NAME == "BAAI/bge-reranker-base"
@@ -33,7 +33,7 @@ class TestConfigDefaults:
         assert config.CHUNK_OVERLAP == 200
 
     def test_vector_search_top_k_default(self):
-        assert config.VECTOR_SEARCH_TOP_K == 20
+        assert config.VECTOR_SEARCH_TOP_K == 10
 
     def test_reranker_top_k_default(self):
         assert config.RERANKER_TOP_K == 5

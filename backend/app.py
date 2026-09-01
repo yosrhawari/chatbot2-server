@@ -1,7 +1,9 @@
 import logging
 
+from config import LOG_LEVEL
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
@@ -36,6 +38,8 @@ from router import route_query
 from session import session_manager
 from analytics import load_dataframes
 from models import semantic_cache
+from auth import auth_store, login as auth_login, client_info
+from database import init_db, db_available
 
 
 SESSION_COOKIE = "session_id"
@@ -80,6 +84,8 @@ async def lifespan(app: FastAPI):
     )
     logger.info("[STARTUP] Pre-loading and normalizing DataFrames...")
     load_dataframes()
+    logger.info("[STARTUP] Initializing Oracle schema...")
+    init_db()
     yield
     logger.info("[SHUTDOWN] Stopping application...")
 
@@ -107,13 +113,72 @@ class ChatRequest(BaseModel):
     message: str
 
 
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
 @app.get("/health")
 def health():
     return {
         "status": "ok",
         "vector_documents": get_collection_count(),
         "in_flight_chats": _in_flight,
+        "database": "oracle" if db_available() else "unavailable",
     }
+
+
+# ── Authentication (plan §7) ─────────────────────────────────────────────────
+# Login verifies COMPTE.password_hash (bcrypt), then binds the client_id to
+# the browser session cookie SERVER-side. /chat only ever uses this binding:
+# the client_id is never taken from the question text.
+
+
+@app.post("/login")
+def login(
+    body: LoginRequest,
+    http_request: Request,
+    response: Response,
+):
+    if not db_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Database unavailable. Check ORACLE_* settings in the server .env.",
+        )
+    result = auth_login(body.email, body.password)
+    if result is None:
+        raise HTTPException(status_code=401, detail="invalid credentials")
+    session_id, _ = _get_session_id(http_request)
+    auth_store.bind(session_id, result["client_id"])
+    _set_session_cookie(response, session_id)
+    return {
+        "status": "success",
+        "client_id": result["client_id"],
+        "nom": result["nom"],
+        "prenom": result["prenom"],
+        "email": result["email"],
+    }
+
+
+@app.post("/logout")
+def logout(http_request: Request, response: Response):
+    session_id = http_request.cookies.get(SESSION_COOKIE)
+    if session_id:
+        auth_store.unbind(session_id)
+        response.delete_cookie(SESSION_COOKIE)
+    return {"status": "logged out"}
+
+
+@app.get("/me")
+def me(http_request: Request):
+    session_id = http_request.cookies.get(SESSION_COOKIE)
+    client_id = auth_store.get_client_id(session_id) if session_id else None
+    if client_id is None:
+        raise HTTPException(status_code=401, detail="not authenticated")
+    info = client_info(client_id)
+    if info is None:
+        raise HTTPException(status_code=401, detail="not authenticated")
+    return {"status": "authenticated", **info}
 
 
 def _check_admin(token: str) -> None:
@@ -163,10 +228,18 @@ async def chat(
         assert _chat_semaphore is not None
         async with _chat_semaphore:
             session_id, _ = _get_session_id(http_request)
+            # Resolve the authenticated client from the server-side store.
+            client_id = auth_store.get_client_id(session_id)
+            logger.debug(
+                "[CHAT] session_id=%s client_id=%s message=%r",
+                session_id,
+                client_id,
+                (request.message or "")[:120],
+            )
             # route_query is blocking (LLM + reranker on CPU). Off-load to a
             # worker thread so the event loop stays responsive to /health etc.
             result = await asyncio.to_thread(
-                route_query, request.message, session_id
+                route_query, request.message, session_id, client_id
             )
             _set_session_cookie(response, session_id)
             return result

@@ -79,14 +79,17 @@ class TestDeterministicIds:
         ids2 = _deterministic_ids(chunks)
         assert ids1 == ids2
 
-    def test_different_content_different_id(self):
+    def test_different_content_same_position_same_id(self):
+        # Deliberate design: ids digest (source, position) ONLY — never the
+        # content — so re-ingesting an edited document overwrites the same
+        # slots instead of accumulating stale chunks in the vector store.
         chunks_a = [
             Document(page_content="hello", metadata={"source": "doc1.txt"})
         ]
         chunks_b = [
             Document(page_content="world", metadata={"source": "doc1.txt"})
         ]
-        assert _deterministic_ids(chunks_a) != _deterministic_ids(chunks_b)
+        assert _deterministic_ids(chunks_a) == _deterministic_ids(chunks_b)
 
     def test_same_content_different_source_different_id(self):
         chunks_a = [
@@ -133,8 +136,12 @@ class TestDataframeSummary:
         summary = dataframe_summary(df)
         assert summary["summary"]["rows"] == 0
 
-    def test_no_row_data_leak(self):
-        df = pd.DataFrame({"secret": ["this-should-not-appear"]})
+    def test_no_long_row_value_leak(self):
+        # Summary embeds ONLY short ground-truth samples (max 40 chars each,
+        # max 2 per column) — a long cell value must never appear whole.
+        long_value = "x" * 200
+        df = pd.DataFrame({"secret": [long_value]})
         summary = dataframe_summary(df)
         raw = str(summary)
-        assert "this-should-not-appear" not in raw
+        assert long_value not in raw
+        assert len(raw) < 500

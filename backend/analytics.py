@@ -22,6 +22,7 @@ from langchain_core.output_parsers import StrOutputParser
 
 from config import CACHE_DIR
 from models import llm_client
+from amount_guard import _answer_invents_money
 
 
 # ── Qwen2.5:1.5b compatibility note ──────────────────────────────────────────
@@ -1313,6 +1314,14 @@ def compose_analytics_answer(query: str, explanation: str, data: Any) -> str:
             logger.info(
                 "[ANALYTICS] Composer output looked like JSON/prompt echo; "
                 "using deterministic French summary."
+            )
+            return fallback
+        # Same money-whitelist as the personal path: any figure in the prose
+        # that is absent from the executed result must never reach the user.
+        if _answer_invents_money(answer, data):
+            logger.warning(
+                "[ANALYTICS] Composer invented a figure absent from the "
+                "result; using deterministic French summary."
             )
             return fallback
         return answer

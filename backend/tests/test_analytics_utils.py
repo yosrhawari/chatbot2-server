@@ -5,12 +5,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import analytics
 from analytics import (
     _validate_code,
     _df_to_records,
     format_result,
     convert_numpy,
     _maybe_parse_dates,
+    compose_analytics_answer,
+    fallback_french_summary,
 )
 
 
@@ -125,7 +128,7 @@ class TestDfToRecords:
         assert records[0]["value"] == 1.0
         assert records[1]["value"] is None
         assert records[2]["value"] == 3.0
-
+        
     def test_empty_dataframe(self):
         df = pd.DataFrame({"a": []})
         records = _df_to_records(df)
@@ -135,46 +138,46 @@ class TestDfToRecords:
 class TestFormatResult:
     def test_none_result(self):
         result = format_result(None)
-        assert result["answer"] == "No result was returned."
+        assert result["answer"] == "Aucun résultat n'a été renvoyé."
         assert result["data"] == []
 
     def test_dataframe(self):
         df = pd.DataFrame({"col": [1, 2]})
         result = format_result(df)
-        assert "Found 2 records" in result["answer"]
+        assert "2 enregistrements correspondant à la requête" in result["answer"]
         assert result["data"] == [{"col": 1}, {"col": 2}]
 
     def test_series(self):
         s = pd.Series([10, 20, 30], name="values")
         result = format_result(s)
-        assert "series" in result["answer"].lower()
+        assert "série" in result["answer"].lower()
         assert len(result["data"]) == 3
 
     def test_dict(self):
         d = {"total": 100, "avg": 50.5}
         result = format_result(d)
-        assert "2 value(s)" in result["answer"]
+        assert "2 valeurs calculées" in result["answer"]
         assert result["data"] == [d]
 
     def test_list_of_dicts(self):
         data = [{"name": "Alice"}, {"name": "Bob"}]
         result = format_result(data)
-        assert "2 record(s)" in result["answer"]
+        assert "2 enregistrements trouvés" in result["answer"]
         assert result["data"] == data
 
     def test_list_of_scalars(self):
         data = [10, 20, 30]
         result = format_result(data)
-        assert "3 record(s)" in result["answer"]
+        assert "3 enregistrements trouvés" in result["answer"]
         assert result["data"] == [{"value": 10}, {"value": 20}, {"value": 30}]
 
     def test_scalar(self):
         result = format_result(42)
-        assert "Result: 42" in result["answer"]
+        assert "Résultat : 42" in result["answer"]
 
     def test_string(self):
         result = format_result("hello")
-        assert "Result: hello" in result["answer"]
+        assert "Résultat : hello" in result["answer"]
 
 
 class TestMaybeParseDates:
@@ -202,3 +205,56 @@ class TestMaybeParseDates:
         df = pd.DataFrame({"x": ["hello", "world"]})
         result = _maybe_parse_dates(df)
         assert result["x"].iloc[0] == "hello"
+
+
+class _FakeComposerChain:
+    def __init__(self, output):
+        self._output = output
+        self.calls = 0
+
+    def invoke(self, *args, **kwargs):
+        self.calls += 1
+        return self._output
+
+
+class TestComposeAnalyticsAnswerAmountGuard:
+    """The analytics composer may not invent a figure that is absent from the
+    executed result (same money-whitelist as the personal Oracle path)."""
+
+    QUERY = "Quel est le montant total des primes ?"
+    EXPLANATION = "somme de la colonne prime"
+    DATA = [{"prime": 1500}]
+
+    def test_legit_figure_kept(self, monkeypatch):
+        chain = _FakeComposerChain("Le montant total des primes est de 1 500 DT.")
+        monkeypatch.setattr(analytics, "_composer_chain", chain)
+        answer = compose_analytics_answer(self.QUERY, self.EXPLANATION, self.DATA)
+        assert answer == "Le montant total des primes est de 1 500 DT."
+
+    def test_invented_figure_falls_back(self, monkeypatch):
+        chain = _FakeComposerChain("Le montant total des primes est de 12 000 DT.")
+        monkeypatch.setattr(analytics, "_composer_chain", chain)
+        answer = compose_analytics_answer(self.QUERY, self.EXPLANATION, self.DATA)
+        assert "12 000" not in answer
+        assert answer == fallback_french_summary(
+            self.QUERY, self.EXPLANATION, self.DATA
+        )
+
+    def test_row_count_mention_kept(self, monkeypatch):
+        data = [{"prime": 100}, {"prime": 200}, {"prime": 300}]
+        chain = _FakeComposerChain("3 enregistrements correspondent à votre demande.")
+        monkeypatch.setattr(analytics, "_composer_chain", chain)
+        answer = compose_analytics_answer(self.QUERY, self.EXPLANATION, data)
+        assert "3 enregistrements" in answer
+
+    def test_scalar_result_legit_figure_kept(self, monkeypatch):
+        chain = _FakeComposerChain("Le résultat est 250 DT.")
+        monkeypatch.setattr(analytics, "_composer_chain", chain)
+        answer = compose_analytics_answer(self.QUERY, self.EXPLANATION, {"total": 250})
+        assert answer == "Le résultat est 250 DT."
+
+    def test_scalar_result_invented_figure_rejected(self, monkeypatch):
+        chain = _FakeComposerChain("Le résultat est 999 DT.")
+        monkeypatch.setattr(analytics, "_composer_chain", chain)
+        answer = compose_analytics_answer(self.QUERY, self.EXPLANATION, {"total": 250})
+        assert "999" not in answer

@@ -1,0 +1,17 @@
+[Unit]
+Description=Comar Chatbot — FastAPI Backend
+After=network.target
+
+[Service]
+Type=simple
+User=comar
+WorkingDirectory=/opt/comar/backend
+EnvironmentFile=-/opt/comar/backend/.env
+ExecStart=/opt/comar/backend/venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

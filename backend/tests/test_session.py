@@ -54,7 +54,9 @@ class TestConversationMemory:
         assert "Assistant:" in history
 
     def test_thread_safety(self):
-        mem = ConversationMemory(max_turns=200)
+        # max_chars raised so the char-truncing get_history() does not drop
+        # the oldest turns (the default 2000 chars caps ~7 messages of 60 c.).
+        mem = ConversationMemory(max_turns=200, max_chars=20000)
         errors = []
 
         def writer(prefix, count):

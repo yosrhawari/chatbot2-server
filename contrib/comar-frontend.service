@@ -1,0 +1,18 @@
+[Unit]
+Description=Comar Chatbot — Streamlit Frontend
+After=network.target comar-backend.service
+Wants=comar-backend.service
+
+[Service]
+Type=simple
+User=comar
+WorkingDirectory=/opt/comar/frontend_streamlit
+Environment=API_URL=http://127.0.0.1:8000
+ExecStart=/opt/comar/frontend_streamlit/venv/bin/streamlit run app.py --server.port=8501 --server.address=0.0.0.0
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

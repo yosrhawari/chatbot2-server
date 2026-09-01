@@ -22,6 +22,7 @@ from config import (
     NUM_CTX,
     NUM_PREDICT,
     RERANKER_BATCH_SIZE,
+    SEMANTIC_CACHE_THRESHOLD as _DEFAULT_THRESHOLD,
 )
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -120,10 +121,7 @@ logger.info(f"[INFO] Reranker ready (batch_size={RERANKER_BATCH_SIZE}).")
 # closely, so a loose threshold would serve wrong answers. The PRIMARY hit path
 # is now an exact match on the normalised (condensed) key, which is risk-free;
 # the embedding layer only rescues trivial variants (whitespace/casing/accents).
-try:
-    from config import SEMANTIC_CACHE_THRESHOLD as _DEFAULT_THRESHOLD
-except ImportError:
-    _DEFAULT_THRESHOLD = 0.97
+# The value is configurable via SEMANTIC_CACHE_THRESHOLD in config.py/.env.
 
 
 class SemanticCache:

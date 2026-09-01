@@ -18,6 +18,7 @@ from config import (
 )
 
 from ingest import get_vectorstore, normalize_arabic_query, chapter_hint, chapter_reference
+from language import detect_language
 from session import ConversationMemory
 
 from models import (
@@ -29,6 +30,11 @@ NO_ANSWER = (
     "Je suis désolé, mais la documentation ne contient pas les informations "
     "nécessaires pour répondre à cette question."
 )
+NO_ANSWER_AR = "عذراً، لا تحتوي الوثائق على المعلومات اللازمة للإجابة على هذا السؤال."
+
+
+def _no_answer(lang: str) -> str:
+    return NO_ANSWER_AR if lang == "ar" else NO_ANSWER
 
 reranker_compressor.top_n = RERANKER_TOP_K
 
@@ -58,30 +64,70 @@ condense_prompt = ChatPromptTemplate.from_messages([
 query_condenser = condense_prompt | llm_client | StrOutputParser()
 
 # ── QA Answering Chain ────────────────────────────────────────────────────────
-# Condensed to the rules that matter most for a small model:
-# grounding, no hallucination, direct structured style, source citation,
-# French output.
-qa_prompt = ChatPromptTemplate.from_messages([
-    ("system",
-     "Tu es un assistant commercial. Règles strictes:\n"
-     "1. Réponds TOUJOURS en français, même si la question ou le contexte est "
-     "en arabe: traduis alors l'essentiel en français.\n"
-     "2. Réponds UNIQUEMENT avec les informations du contexte fourni.\n"
-     "3. Commence DIRECTEMENT par un titre en gras (ex: **...**) puis des "
-     "puces concises. N'écris AUCUNE phrase d'introduction (pas de «compte "
-     "tenu», «d'après le document») ni de conclusion (pas de «il convient de "
-     "noter», «il est important de souligner»).\n"
-     "4. Cite la source entre crochets après chaque fait, ex: [document.pdf].\n"
-     "5. Si la réponse est absente du contexte, réponds exactement: "
-     "\"Je suis désolé, mais la documentation ne contient pas les informations "
-     "nécessaires pour répondre à cette question.\"\n"
-     "6. N'affiche jamais de JSON brut ni de blocs de code."),
-    ("user",
-     "Historique:\n{history}\n\nContexte:\n{context}\n\n"
-     "Question: {question}\n\n"
-     "Rédige la réponse en français."),
-])
-qa_chain = qa_prompt | llm_client | StrOutputParser()
+# The language of the question determines the language of the answer. Each
+# question runs through the prompt template of its own language; articles
+# cited in the answer must be copied VERBATIM from the [ARTICLE: ... |
+# TITRE: ...] labels embedded in the context (never invented by the model).
+
+_QA_SYSTEM_FR = (
+    "Tu es l'assistant du contrat d'assurance HAYETT 2000. Règles strictes:\n"
+    "1. Réponds TOUJOURS dans la même langue que la question de l'utilisateur. "
+    "Ne change JAMAIS de langue. La question est en français, donc tu DOIS répondre en français.\n"
+    "2. Réponds en t'appuyant sur le contexte fourni. Si l'information est dans le contexte, utilise-la pour répondre.\n"
+    "3. Chaque morceau de contexte débute par [ARTICLE: <numéro> | TITRE: "
+    "<titre>]. Reprends EXACTEMENT ce numéro et ce titre d'article dans ta "
+    "réponse — ne les reformule jamais et n'invente jamais un titre d'article.\n"
+    "4. Réponds directement à la question en expliquant la règle applicable. "
+    "Appuie-toi sur le contexte, cite l'article concerné avec son "
+    "numéro et son titre exacts ([ARTICLE: ... | TITRE: ...]), donne les "
+    "détails importants (conditions, délais, pourcentages). "
+    "Ne réponds JAMAIS uniquement avec le titre de l'article.\n"
+    "5. Si la réponse est vraiment absente du contexte, réponds exactement: "
+    "\"Je suis désolé, mais la documentation ne contient pas les informations "
+    "nécessaires pour répondre à cette question.\"\n"
+    "6. Si l'utilisateur a posé la question en arabe, rédige la réponse en "
+    "arabe, avec le titre de l'article tel qu'il figure dans le contexte.\n"
+    "7. N'affiche jamais de JSON brut ni de blocs de code.\n"
+    "8. Tous les montants cités sont en dinars tunisiens : écris « DT » après "
+    "un montant, JAMAIS « € », « EUR » ou « euro \"."
+)
+
+_QA_SYSTEM_AR = (
+    "أنت مساعد عقد التأمين \"HAYETT 2000\". قواعد صارمة:\n"
+    "1. أجب دائماً بنفس لغة سؤال المستخدم. لا تغيّر اللغة إلا إذا طلب "
+    "المستخدم ذلك صراحة.\n"
+    "2. اعتمد حصرياً على المعلومات الموجودة في السياق المقدم.\n"
+    "3. كل جزء من السياق يبدأ بـ [ARTICLE: <الرقم> | TITRE: <العنوان>]. أعد "
+    "استخدام هذا الرقم وهذا العنوان كما هما تماماً في إجابتك — لا تعيد "
+    "صياغتهما ولا تخترع عنواناً أبداً.\n"
+    "4. أجب مباشرة على السؤال من خلال شرح القاعدة المعمول بها. "
+    "اعتمد حصراً على السياق، واستشهد بالبند المعني برقمه وعنوانه "
+    "بالضبط ([ARTICLE: ... | TITRE: ...]), donne les détails importants "
+    "(conditions, délais, pourcentages). Ne réponds JAMAIS uniquement avec "
+    "le titre de l'article.\n"
+    "5. إذا كانت الإجابة غير موجودة في السياق، أجب حرفياً: \"عذراً، لا "
+    "تحتوي الوثائق على المعلومات اللازمة للإجابة على هذا السؤال.\"\n"
+    "6. إذا سأل المستخدم بالفرنسية، اكتب الإجابة بالفرنسية مع العنوان كما "
+    "هو موجود في le contexte.\n"
+    "7. لا تعرض أبداً JSON خام أو كتل تعليمات برمجية.\n"
+    "8. جميع المبالغ المذكورة بالدينار التونسي: اكتب «دينار» بعد أي مبلغ، "
+    "وأبداً «€» أو «يورو» ou «EUR»."
+)
+
+_QA_USER = (
+    "Historique:\n{history}\n\n"
+    "Contexte:\n{context}\n\n"
+    "Question: {question}\n\n"
+    "Rédige la réponse dans la langue de la question."
+)
+
+
+def _make_qa_prompt(lang: str):
+    system = _QA_SYSTEM_AR if lang == "ar" else _QA_SYSTEM_FR
+    return ChatPromptTemplate.from_messages([
+        ("system", system),
+        ("user", _QA_USER),
+    ])
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -167,20 +213,35 @@ def _dedupe_documents(primary, secondary):
     return merged
 
 
+def _article_label(doc) -> str:
+    """Prefix for a context piece. When the chunk carries article metadata,
+    emit the verbatim [ARTICLE: … | TITRE: …] label the model must reuse;
+    otherwise fall back to the bare source filename."""
+    metadata = getattr(doc, "metadata", {})
+    article = metadata.get("article")
+    title = metadata.get("title")
+    if article and title:
+        return f"[ARTICLE: {article} | TITRE: {title}]"
+    if article:
+        return f"[ARTICLE: {article}]"
+    return f"[{_normalize_source(metadata.get('source', 'unknown'))}]"
+
+
 def _build_context(reranked_docs):
     """Concatenate chunks up to a character budget.
 
     Returns (context_string, used_docs) where used_docs are ONLY the documents
     that actually fit inside the budget. Callers must cite from used_docs, not
     the full reranked list -- otherwise we would cite sources the model never
-    saw in its context.
+    saw in its context. Every piece is prefixed by its article label so the
+    model can quote the exact article title from the document metadata.
     """
     parts: list[str] = []
     used: list = []
     total = 0
     for doc in reranked_docs:
-        source = _normalize_source(doc.metadata.get("source", "unknown"))
-        piece = f"[{source}]\n{doc.page_content}"
+        label = _article_label(doc)
+        piece = f"{label}\n{doc.page_content}"
         if total + len(piece) > _MAX_CONTEXT_CHARS and parts:
             break
         parts.append(piece)
@@ -325,15 +386,61 @@ def extract_sources(documents: List) -> List[str]:
     return sources
 
 
+def extract_articles(documents: List) -> List[dict]:
+    """Article provenance of the chunks actually used in the answer.
+
+    Returns the article number, VERBATIM title, source and language straight
+    from the chunk metadata -- never invented by the LLM.
+    """
+    articles: list[dict] = []
+    seen = set()
+    for doc in documents:
+        metadata = getattr(doc, "metadata", {})
+        article = metadata.get("article")
+        if not article:
+            continue
+        key = (str(article), str(metadata.get("title", "")), str(metadata.get("source", "")))
+        if key in seen:
+            continue
+        seen.add(key)
+        articles.append(
+            {
+                "article": str(article),
+                "title": str(metadata.get("title", "")),
+                "source": _normalize_source(metadata.get("source")),
+                "language": str(metadata.get("language", "")),
+            }
+        )
+    return articles
+
+
+def _is_title_only(ans: str) -> bool:
+    """Detect if the answer is only an article title without substantive content."""
+    t = ans.strip()
+    # Regex matching only a bold article title with no other content (French/English)
+    if re.fullmatch(r"\s*\*\*ARTICLE[^*]*\*\*\s*", t):
+        return True
+    # Arabic article title only
+    if re.fullmatch(r"\s*\*\*(?:الفصل|المادة)\s+\d+[^*]*\*\*\s*", t):
+        return True
+    # Short response with ARTICLE/الفصل/المادة but no real explanation
+    t_lower = t.lower()
+    if ("article" in t_lower or "الفصل" in t or "المادة" in t) and len(t.split()) < 20 and "peut" not in t_lower and "يمكن" not in t_lower and t.count(".") < 1 and "-" not in t:
+        return True
+    return False
+
+
 def answer_rag_question(question: str, memory: ConversationMemory, condensed_query: str = None) -> dict:
+    language = detect_language(question)
     history = memory.get_history()
     trimmed_history = _trim_history(history)
 
     retrieval = retrieve_context(question, history=trimmed_history, condensed_query=condensed_query)
 
     if not retrieval["context"].strip():
-        answer = NO_ANSWER
+        answer = _no_answer(language)
     else:
+        qa_chain = _make_qa_prompt(language) | llm_client | StrOutputParser()
         try:
             answer = qa_chain.invoke(
                 {
@@ -344,10 +451,36 @@ def answer_rag_question(question: str, memory: ConversationMemory, condensed_que
             ).strip()
             # Guard: if the model returns an empty string, use the fallback.
             if not answer:
-                answer = NO_ANSWER
+                answer = _no_answer(language)
+            # Guard: if the answer is only an article title without explanation, retry once
+            elif _is_title_only(answer):
+                logger.warning(f"[RAG] Title-only answer detected, retrying for: {question!r}")
+                retry_system = (
+                    _QA_SYSTEM_FR
+                    + "\n9. Ta réponse précédente était uniquement le titre. Réécris une réponse COMPLÈTE en expliquant la règle, toujours avec le titre exact."
+                ) if language != "ar" else (
+                    _QA_SYSTEM_AR
+                    + "\n9. Ta réponse précédente était uniquement le titre. Réécris une réponse COMPLÈTE en expliquant la règle, toujours avec le titre exact."
+                )
+                retry_prompt = ChatPromptTemplate.from_messages([
+                    ("system", retry_system),
+                    ("user", _QA_USER),
+                ])
+                try:
+                    retry = (retry_prompt | llm_client | StrOutputParser()).invoke({
+                        "question": question,
+                        "context": retrieval["context"],
+                        "history": trimmed_history,
+                    }).strip()
+                    if retry and not _is_title_only(retry):
+                        answer = retry
+                    else:
+                        logger.warning(f"[RAG] Retry still title-only, keeping original for: {question!r}")
+                except Exception as e:
+                    logger.warning(f"[RAG] Retry failed: {e}")
         except Exception as e:
             logger.error(f"[RAG] QA chain failed: {e}")
-            answer = NO_ANSWER
+            answer = _no_answer(language)
 
     memory.add_user(question)
     memory.add_assistant(answer)
@@ -356,5 +489,8 @@ def answer_rag_question(question: str, memory: ConversationMemory, condensed_que
         "answer": answer,
         # Cite ONLY the docs that actually made it into the context the model saw.
         "sources": extract_sources(retrieval["used_documents"]),
+        # Article titles come from the chunk metadata, not from the LLM.
+        "articles": extract_articles(retrieval["used_documents"]),
+        "language": language,
         "condensed_query": retrieval["condensed_query"],
     }

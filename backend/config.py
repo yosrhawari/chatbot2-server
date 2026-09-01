@@ -1,15 +1,22 @@
 import os
+import sys
 from dotenv import load_dotenv
 
-load_dotenv()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# PyInstaller frozen: .env à côté de l'exe (HAYETT_Admin_Tools/.env)
+if getattr(sys, 'frozen', False):
+    _exe_dir = os.path.dirname(sys.executable)
+    _env_path = os.path.join(_exe_dir, ".env")
+else:
+    _env_path = os.path.join(BASE_DIR, ".env")
+load_dotenv(_env_path)
 
-APP_NAME = "Vilavi Chatbot"
+APP_NAME = "Comar Chatbot"
 APP_VERSION = "2.9.0"
 HOST = "0.0.0.0"
 PORT = 8000
 
 # --- model storage ----------------------------------------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 HUGGINGFACE_CACHE_DIR = os.path.join(MODELS_DIR, "huggingface")
 os.environ.setdefault("HF_HOME", HUGGINGFACE_CACHE_DIR)
@@ -63,6 +70,16 @@ RERANKER_MODEL_NAME = "BAAI/bge-reranker-base"
 
 # --- conversation memory ----------------------------------------------------
 MEMORY_SIZE = int(os.getenv("MEMORY_SIZE", 5))
+# Character budget for the rendered history string (session.py). A turn cap
+# alone is not enough when a single message is huge (long pasted text).
+HISTORY_MAX_CHARS = int(os.getenv("HISTORY_MAX_CHARS", 2000))
+
+# --- semantic cache ----------------------------------------------------------
+# Similarity threshold for the secondary embedding match in models.SemanticCache.
+# Kept high ON PURPOSE: a near-miss query ("garantie produit A" vs "produit B")
+# can embed very closely, and a cached wrong answer is a hallucination risk.
+# Clamped to [0.80, 1.0]; the exact-key primary path is unaffected by this value.
+SEMANTIC_CACHE_THRESHOLD = min(1.0, max(0.80, float(os.getenv("SEMANTIC_CACHE_THRESHOLD", 0.97))))
 
 # --- paths ------------------------------------------------------------------
 CSV_DIR = os.path.join(BASE_DIR, "data", "csv")
@@ -72,9 +89,33 @@ CHROMA_COLLECTION = "documents"
 PDF_DIR = os.path.join(BASE_DIR, "data", "pdf")
 DOCX_DIR = os.path.join(BASE_DIR, "data", "docx")
 TXT_DIR = os.path.join(BASE_DIR, "data", "txt")
+MD_DIR = os.path.join(BASE_DIR, "data", "md")
 CHROMA_DIR = CHROMA_PATH
 
 CACHE_DIR = os.path.join(BASE_DIR, "cache", "dataframes")
+
+# --- Oracle database --------------------------------------------------------
+# Oracle is the source of client/contract data (COMPTE, CLIENT, CONTRAT,
+# VERSEMENT, EPARGNE, BENEFICIAIRE). Fill these in .env; when any is empty the
+# DB layer is unavailable and only RAG (documents) + pandas/CSV analytics run.
+# ORACLE_DSN may be given directly (e.g. "localhost:1521/FREEPDB1") or built
+# from ORACLE_HOST/ORACLE_PORT/ORACLE_SERVICE.
+ORACLE_USER = os.getenv("ORACLE_USER", "")
+ORACLE_PASSWORD = os.getenv("ORACLE_PASSWORD", "")
+ORACLE_HOST = os.getenv("ORACLE_HOST", "localhost")
+ORACLE_PORT = os.getenv("ORACLE_PORT", "1521")
+ORACLE_SERVICE = os.getenv("ORACLE_SERVICE", "FREEPDB1")
+ORACLE_DSN = os.getenv("ORACLE_DSN", "")
+if not ORACLE_DSN:
+    ORACLE_DSN = f"{ORACLE_HOST}:{ORACLE_PORT}/{ORACLE_SERVICE}"
+# Seeding (schema + sample clients) is an EXPLICIT, opt-in operation (see
+# database.py). It is OFF by default: the backend never creates or mutates the
+# existing HAYETT_USER tables unless the operator sets this to 1.
+SEED_DB_ON_START = os.getenv("SEED_DB_ON_START", "0") == "1"
+
+# --- authentication ---------------------------------------------------------
+# How long a login stays bound to a browser session (seconds).
+AUTH_TTL_SECONDS = int(os.getenv("AUTH_TTL_SECONDS", 60 * 60 * 12))
 
 # --- sessions ---------------------------------------------------------------
 MAX_SESSIONS = int(os.getenv("MAX_SESSIONS", 1000))
@@ -95,6 +136,16 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 # memory, which is fatal on an 8 GB VM.
 DEV_RELOAD = os.getenv("DEV_RELOAD", "0") == "1"
 
+# --- email (creation compte client) -----------------------------------------
+# SMTP standard (stdlib smtplib). Aucune valeur en dur, tout via .env.
+SMTP_HOST = os.getenv("SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+SMTP_USERNAME = os.getenv("SMTP_USERNAME", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_FROM = os.getenv("SMTP_FROM", "")
+SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "1") == "1"
+SMTP_TIMEOUT = int(os.getenv("SMTP_TIMEOUT", 10))
+
 # --- analytics fallback -----------------------------------------------------
 FALLBACK_ROW_THRESHOLD = 0
 FALLBACK_ENABLED = True
@@ -103,6 +154,7 @@ FALLBACK_ENABLED = True
 os.makedirs(PDF_DIR, exist_ok=True)
 os.makedirs(DOCX_DIR, exist_ok=True)
 os.makedirs(TXT_DIR, exist_ok=True)
+os.makedirs(MD_DIR, exist_ok=True)
 os.makedirs(CSV_DIR, exist_ok=True)
 os.makedirs(CHROMA_DIR, exist_ok=True)
 os.makedirs(CACHE_DIR, exist_ok=True)
