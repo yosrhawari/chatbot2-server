@@ -243,37 +243,31 @@ _HYBRID_SYSTEM_FR = (
     "Tu es un conseiller client de l'assurance HAYETT 2000. Rédige la réponse "
     "en français (la langue de la question).\n"
     "Combine les DEUX sources: les Règles du contrat (Documents) et les Données "
-    "du client.\n"
-    "FORMAT: sois concis; traite chaque point sous un court titre en gras suivi "
-    "de puces; place les chiffres concrets dans les puces.\n"
+    "du client (Calcul et épargne).\n"
+    "FORMAT: sois concis et structuré; traite chaque point sous un court titre en gras suivi "
+    "de puces; place les chiffres concrets (montants en DT, pourcentages) dans les puces.\n"
     "RÈGLES:\n"
     "- Tous les montants sont en dinars tunisiens : écris « DT » après un "
     "montant, JAMAIS « € », « EUR » ou « euro ».\n"
-    "- Utilise UNIQUEMENT les Données du client pour tout chiffre ou montant — "
-    "n'invente JAMAIS.\n"
-    "- Pour citer un article, reprends EXACTEMENT le numéro et le titre "
-    "[ARTICLE: ... | TITRE: ...] indiqués dans les Règles; ne les reformule pas.\n"
-    "- Si la réponse est absente des deux sources, dis-le simplement.\n"
-    "- Un calcul (ex: bornes de retrait 10 %–75 %) est INDICATIF: mentionne que "
-    "« le traitement réel est effectué par l'assureur ».\n"
+    "- Utilise les Données du client et le Calcul fourni pour donner les chiffres précis (ex: épargne totale, montant maximum calculé en DT, montant minimum en DT).\n"
+    "- Réponds directement à la question en indiquant le montant maximum exact en DT que le client peut demander (par exemple 75 % de l'épargne pour un retrait partiel, ou 80 % pour une avance) ainsi que les conditions requises.\n"
+    "- Pour citer un article, mentionne le numéro et le titre de l'article (ex: [ARTICLE: ARTICLE 10 | TITRE: RETRAIT ANTICIPE...]).\n"
+    "- Mentionne que ce calcul est indicatif et que le traitement réel est effectué par l'assureur.\n"
     "- N'affiche JAMAIS de JSON brut, de blocs de code ni de liste d'objets."
 )
 
 _HYBRID_SYSTEM_AR = (
     "أنت مستشار عملاء شركة التأمين \"HAYETT 2000\". اكتب الإجابة بالعربية "
     "(لغة السؤال).\n"
-    "اجمع بين المصدرين: قواعد العقد (المستندات) وبيانات العميل.\n"
-    "التنسيق: كن موجزاً؛ عالج كل نقطة بعنوان قصير بخط عريض ثم بنقاط؛ ضع "
-    "الأرقام في النقاط.\n"
+    "اجمع بين المصدرين: قواعد العقد (المستندات) وبيانات وحسابات العميل.\n"
+    "التنسيق: كن موجزاً ومنظماً؛ عالج كل نقطة بعنوان قصير بخط عريض ثم بنقاط؛ ضع "
+    "الأرقام الملموسة (المبالغ بالدينار، النسب) في النقاط.\n"
     "القواعد:\n"
-    "- جميع المبالغ بالدينار التونسي: اكتب «دينار» بعد أي مبلغ، وأبداً «€» "
-    "أو «يورو» أو «EUR».\n"
-    "- استخدم بيانات العميل حصرياً لكل رقم أو مبلغ — لا تخترع أبداً.\n"
-    "- عند الاستشهاد بفصل، أعد استخدام رقمه وعنوانه كما هما تماماً "
-    "[ARTICLE: ... | TITRE: ...] الواردين في القواعد؛ لا تعيد صياغتهما.\n"
-    "- إذا لم تجد الإجابة في المصدرين، قل ذلك ببساطة.\n"
-    "- أي حساب (مثل حدود الانسحاب 10٪–75٪) تقديري: اذكر أن «المعالجة الفعلية "
-    "تقوم بها شركة التأمين».\n"
+    "- جميع المبالغ بالدينار التونسي: اكتب «دينار» بعد أي مبلغ، وأبداً «€» أو «يورو» أو «EUR».\n"
+    "- استخدم بيانات العميل والحساب المقدَّم لتحديد الأرقام بدقة (إجمالي الادخار، أقصى مبلغ محسوب بالدينار، الحد الأدنى بالدينار).\n"
+    "- أجب مباشرة على السؤال مع توضيح أقصى مبلغ متاح بالدينار (مثلاً 75% للانسحاب الجزئي أو 80% للتسبيق) مع الشروط.\n"
+    "- عند الاستشهاد بفصل، اذكر رقم واسم الفصل.\n"
+    "- وضح أن هذا الحساب تقديري والمعالجة الفعلية تقوم بها شركة التأمين.\n"
     "- لا تعرض أبداً JSON خام أو كتل تعليمات برمجية أو قوائم كائنات."
 )
 
@@ -471,7 +465,7 @@ def route_query(query: str, session_id: str, client_id: int = None) -> dict:
     # serving it to another session would be wrong. The condensed query is
     # self-contained and safe to share. We condense ONCE here and reuse it in
     # handle_rag so there is no second condensation LLM call.
-    history = memory.get_history()
+    history = memory.get_history(max_turns=1, max_chars=800)
     condensed = condense_query(query, history)
 
     cached = semantic_cache.get_cached_response(condensed)
@@ -481,5 +475,8 @@ def route_query(query: str, session_id: str, client_id: int = None) -> dict:
         return cached
 
     response = handle_rag(query, memory, condensed_query=condensed)
-    semantic_cache.add_to_cache(response.get("condensed_query", condensed), response)
+    ans = response.get("answer", "")
+    is_refusal = isinstance(ans, str) and ("documentation ne contient pas" in ans or "لا تحتوي الوثائق" in ans)
+    if ans and not is_refusal:
+        semantic_cache.add_to_cache(response.get("condensed_query", condensed), response)
     return response

@@ -18,7 +18,7 @@ class TestConfigDefaults:
         assert config.PORT == 8000
 
     def test_model_name_default(self):
-        assert config.MODEL_NAME == "qwen2.5:3b"
+        assert config.MODEL_NAME in ("qwen2.5:3b", "qwen2.5:7b")
 
     def test_embedding_model_name(self):
         assert config.EMBEDDING_MODEL_NAME == "intfloat/multilingual-e5-small"

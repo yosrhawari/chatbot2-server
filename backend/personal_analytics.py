@@ -97,6 +97,21 @@ _PERSONAL_GUARD_FR = (
     r"\bquelle est mon épargne\b", r"\bquel est mon épargne\b",
     r"\bconsulter mon épargne\b", r"\bretirer mon épargne\b",
     r"\bquelle est la durée de mon contrat\b",
+    r"\bquel est mon montant d'épargne\b", r"\bmontant de mon contrat\b",
+    r"\bpuis-je\b.*\bmon contrat\b",
+    r"\bmontant maximum\b.*\bje peux\b.*\bretirer\b.*\bmon contrat\b",
+    r"\bcombien\b.*\bje peux\b.*\bretirer\b.*\bmon contrat\b",
+    r"\bmontant maximum\b.*\bje peux\b.*\bretirer\b.*\bactuellement\b",
+    r"\bcombien\b.*\bje peux\b.*\bretirer\b.*\bactuellement\b",
+    r"\bmontant maximum\b.*\bretirer\b",
+    r"\bcombien\b.*\bretirer\b",
+    r"\bretirer\b.*\bmon contrat\b",
+    r"\bretirer\b.*\bactuellement\b",
+    r"\bpuis-je retirer\b",
+    r"\bje peux retirer\b",
+    r"\bavance\b.*\bmon contrat\b",
+    r"\bcombien\b.*\bavance\b",
+    r"\bmontant\b.*\bavance\b",
 )
 _PERSONAL_GUARD_AR = (
     "مدخراتي", "عقدي", "اقساطي", "ادخاري", "أقساطي", "مدخرات",
@@ -162,10 +177,11 @@ def classify_personal_intent(query: str) -> str:
 # ── Deterministic calculations ───────────────────────────────────────────────
 
 def compute_retrait_bounds(epargne: float) -> dict:
-    """Plan §18: retrait partiel autorisé entre 10 % et 75 % de l'épargne."""
+    """Plan §18: retrait partiel autorisé entre 10 % et 75 % de l'épargne; avance entre 10 % et 80 %."""
     return {
         "min_10_pourcent": round(epargne * 0.10, 2),
         "max_75_pourcent": round(epargne * 0.75, 2),
+        "max_80_pourcent_avance": round(epargne * 0.80, 2),
     }
 
 

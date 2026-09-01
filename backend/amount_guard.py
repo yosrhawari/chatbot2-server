@@ -96,17 +96,44 @@ def _authorized_amounts(data=None, calculation=None) -> set:
 
 def _answer_invents_money(answer: str, data=None, calculation=None) -> bool:
     """True when the composed answer contains a monetary figure absent from
-    the data payload. Percentages and calendar years are ignored."""
+    the data payload. Percentages, calendar years, article numbers, durations,
+    and reference counts are ignored."""
     allowed = _authorized_amounts(data, calculation)
     s = str(answer or "")
     for match in _AMOUNT_RE.finditer(s):
         token = match.group(0)
         if not token:
             continue
-        # Percentages (10 %, 75%) are policy bounds, not client amounts.
-        after = s[match.end():match.end() + 3].lstrip()
-        if after.startswith("%"):
+        start, end = match.span()
+        before = s[max(0, start - 20):start].lower()
+        after = s[end:min(len(s), end + 20)].lower()
+
+        # 1. Percentages (10 %, 75 %) are policy bounds, not money amounts
+        if after.lstrip().startswith("%"):
             continue
+
+        # 2. Article / section numbers (Article 10, Art. 9, Chapitre 3, الفصل 9, المادة 10)
+        if re.search(r"(article|art\.?|chapitre|فصل|الفصل|مادة|المادة)\s*$", before):
+            continue
+
+        # 3. Contract IDs / reference numbers (Contrat n° 1, C001, n° 1, no 1)
+        if re.search(r"(n°|no|numéro|numero|contrat|عقد)\s*$", before):
+            continue
+
+        # 4. Durations / time spans (2 ans, 3 années, 6 mois, 30 jours, 2 years, etc.)
+        if re.match(r"^\s*(ans|an\b|années|annees|année|annee|mois|jours|jour|semaines|semaine|heures|heure|years|year|months|month|days|day|سنة|سنوات|أشهر|شهر|أيام|يوم)", after):
+            continue
+
+        # 5. Counts / occurrences (2 fois, 1 avance, 2 avances, 3 contrats, etc.)
+        if re.match(r"^\s*(fois|avance|avances|contrat|contrats|retrait|retraits|تسبيق|تسبيقات|عقود|مرات|مرة)", after):
+            continue
+
+        # 6. Ordinals / bullet numbers (1., 2., 1er, 2ème, etc.)
+        if re.match(r"^\s*(er|ère|ere|ème|eme|th|st|nd|rd)\b", after):
+            continue
+        if (start == 0 or s[start - 1] in "\n\r") and re.match(r"^\s*[.)-]", after):
+            continue
+
         value = _parse_amount_token(token)
         if value is None or value == 0:
             continue

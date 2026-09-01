@@ -1,4 +1,6 @@
 import os
+import re
+import time
 
 import pandas as pd
 import requests
@@ -482,9 +484,19 @@ def do_logout():
     st.toast("Déconnecté")
 
 
+def stream_response(text: str, delay: float = 0.012):
+    """Yield word by word with a slight pause for a natural typing animation."""
+    tokens = re.split(r"(\s+)", str(text or ""))
+    for token in tokens:
+        if token:
+            yield token
+            if token.strip():
+                time.sleep(delay)
+
+
 def process_prompt(prompt: str) -> None:
     """Append the user message, show the typing animation, call /chat and
-    render the assistant reply with its sources/data expanders."""
+    render the assistant reply with a streaming typing effect and expanders."""
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -513,7 +525,9 @@ def process_prompt(prompt: str) -> None:
                 if not analytics_data and data.get("analytics"):
                     analytics_data = data["analytics"].get("data", [])
 
-                placeholder.markdown(answer)
+                placeholder.empty()
+                with placeholder.container():
+                    st.write_stream(stream_response(answer))
 
                 if articles:
                     with st.expander("📄 Articles sources"):

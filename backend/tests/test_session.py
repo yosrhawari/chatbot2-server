@@ -87,6 +87,26 @@ class TestConversationMemory:
         mem.add_assistant("resp")
         assert mem.get_history() != ""
 
+    def test_get_history_with_max_turns(self):
+        mem = ConversationMemory(max_turns=10)
+        mem.add_user("Turn 1 user")
+        mem.add_assistant("Turn 1 assistant")
+        mem.add_user("Turn 2 user")
+        mem.add_assistant("Turn 2 assistant")
+        mem.add_user("Turn 3 user")
+        mem.add_assistant("Turn 3 assistant")
+
+        h1 = mem.get_history(max_turns=1)
+        assert "Turn 3 user" in h1
+        assert "Turn 3 assistant" in h1
+        assert "Turn 2" not in h1
+        assert "Turn 1" not in h1
+
+        h2 = mem.get_history(max_turns=2)
+        assert "Turn 2 user" in h2
+        assert "Turn 3 user" in h2
+        assert "Turn 1" not in h2
+
 
 class TestSessionManager:
     def test_get_memory_creates_new(self):

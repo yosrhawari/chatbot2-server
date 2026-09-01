@@ -21,7 +21,7 @@ class ConversationMemory:
         with self._lock:
             self._messages.append(("Assistant", (text or "").strip()))
 
-    def get_history(self, max_chars: int = None) -> str:
+    def get_history(self, max_chars: int = None, max_turns: int = None) -> str:
         """Render the conversation history, capped by BOTH turns and characters.
 
         We walk the messages newest-first, keeping the most recent ones that
@@ -35,6 +35,10 @@ class ConversationMemory:
 
         if not msgs:
             return ""
+
+        if max_turns is not None and max_turns > 0:
+            msgs = msgs[-(max_turns * 2):]
+
         if limit is None or limit <= 0:
             return "\n".join(f"{role}: {content}" for role, content in msgs)
 

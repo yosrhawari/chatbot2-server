@@ -1,10 +1,17 @@
 import sys
 from unittest.mock import MagicMock
 
+from langchain_core.documents import BaseDocumentCompressor
+
+class _DummyCompressor(BaseDocumentCompressor):
+    top_n: int = 5
+    def compress_documents(self, documents, query, callbacks=None):
+        return documents
+
 _mock_models = MagicMock()
 _mock_models.llm_client = MagicMock()
 _mock_models.embedding_function = MagicMock()
-_mock_models.reranker_compressor = MagicMock()
+_mock_models.reranker_compressor = _DummyCompressor()
 _mock_models.semantic_cache = MagicMock()
 _mock_models.CrossEncoderReranker = MagicMock
 _mock_models.E5Embeddings = MagicMock

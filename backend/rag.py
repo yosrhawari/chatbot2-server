@@ -49,17 +49,18 @@ compression_retriever = ContextualCompressionRetriever(
 # ── Prompt budget constants ───────────────────────────────────────────────────
 # Qwen 1.5B has a small context window (~4 K–8 K tokens).
 # Keep system prompts short and cap history / context passed in at runtime.
-_MAX_HISTORY_CHARS = 800   # ~200 tokens of conversation history
 _MAX_CONTEXT_CHARS = min(MAX_CONTEXT_CHARS, 3000)  # hard cap for this model
 
 # ── History-Aware Query Condensation ─────────────────────────────────────────
-# Simplified: fewer rules, shorter system message.
 condense_prompt = ChatPromptTemplate.from_messages([
     ("system",
-     "Rewrite the follow-up question as a standalone search query. "
-     "Replace pronouns with the real entities from the history. "
-     "Return ONLY the rewritten query, nothing else."),
-    ("user", "History:\n{history}\n\nFollow-up: {query}"),
+     "You are an expert search query optimizer for an insurance assistant.\n"
+     "Given the conversation history and a follow-up question, rewrite it into a standalone search query ONLY if it contains ambiguous pronouns (like 'il', 'elle', 'son', 'sa', 'celui-ci', 'cette option', 'هذا', 'هو').\n"
+     "Rules:\n"
+     "1. If the question is ALREADY a standalone, specific question on a clear topic (e.g. 'Puis-je effectuer un versement exceptionnel ?', 'Quelles sont les conditions de rachat ?'), return the question EXACTLY as written without changing a single word.\n"
+     "2. NEVER invent, merge, or add topics from previous history into a question asking about a different concept.\n"
+     "3. Return ONLY the search query text, with no explanations, no quotes, no conversational filler."),
+    ("user", "History:\n{history}\n\nQuestion: {query}\n\nStandalone Search Query:"),
 ])
 query_condenser = condense_prompt | llm_client | StrOutputParser()
 
@@ -70,73 +71,53 @@ query_condenser = condense_prompt | llm_client | StrOutputParser()
 # TITRE: ...] labels embedded in the context (never invented by the model).
 
 _QA_SYSTEM_FR = (
-    "Tu es l'assistant du contrat d'assurance HAYETT 2000. Règles strictes:\n"
-    "1. Réponds TOUJOURS dans la même langue que la question de l'utilisateur. "
-    "Ne change JAMAIS de langue. La question est en français, donc tu DOIS répondre en français.\n"
-    "2. Réponds en t'appuyant sur le contexte fourni. Si l'information est dans le contexte, utilise-la pour répondre.\n"
-    "3. Chaque morceau de contexte débute par [ARTICLE: <numéro> | TITRE: "
-    "<titre>]. Reprends EXACTEMENT ce numéro et ce titre d'article dans ta "
-    "réponse — ne les reformule jamais et n'invente jamais un titre d'article.\n"
-    "4. Réponds directement à la question en expliquant la règle applicable. "
-    "Appuie-toi sur le contexte, cite l'article concerné avec son "
-    "numéro et son titre exacts ([ARTICLE: ... | TITRE: ...]), donne les "
-    "détails importants (conditions, délais, pourcentages). "
-    "Ne réponds JAMAIS uniquement avec le titre de l'article.\n"
-    "5. Si la réponse est vraiment absente du contexte, réponds exactement: "
-    "\"Je suis désolé, mais la documentation ne contient pas les informations "
-    "nécessaires pour répondre à cette question.\"\n"
-    "6. Si l'utilisateur a posé la question en arabe, rédige la réponse en "
-    "arabe, avec le titre de l'article tel qu'il figure dans le contexte.\n"
-    "7. N'affiche jamais de JSON brut ni de blocs de code.\n"
-    "8. Tous les montants cités sont en dinars tunisiens : écris « DT » après "
-    "un montant, JAMAIS « € », « EUR » ou « euro \"."
+    "Tu es l'assistant officiel du contrat d'assurance HAYETT 2000.\n"
+    "Consignes pour répondre :\n"
+    "1. Langue : Réponds TOUJOURS en français de manière claire, concise et professionnelle.\n"
+    "2. Source : Réponds à la question posée en te basant sur les informations du contexte fourni.\n"
+    "3. Citation : Mentionne le numéro et le titre de l'article concerné (par exemple : **Article 9 - Avances sur contrat**).\n"
+    "4. Précision : Explique la règle applicable et donne les détails importants (conditions, pourcentages, délais, montants).\n"
+    "5. Montants : Tous les montants sont en dinars tunisiens (écris « DT »).\n"
+    "6. Absence d'information : Si et seulement si le contexte ne contient aucun élément pour répondre à la question, réponds exactement : "
+    "\"Je suis désolé, mais la documentation ne contient pas les informations nécessaires pour répondre à cette question.\""
 )
 
 _QA_SYSTEM_AR = (
-    "أنت مساعد عقد التأمين \"HAYETT 2000\". قواعد صارمة:\n"
-    "1. أجب دائماً بنفس لغة سؤال المستخدم. لا تغيّر اللغة إلا إذا طلب "
-    "المستخدم ذلك صراحة.\n"
-    "2. اعتمد حصرياً على المعلومات الموجودة في السياق المقدم.\n"
-    "3. كل جزء من السياق يبدأ بـ [ARTICLE: <الرقم> | TITRE: <العنوان>]. أعد "
-    "استخدام هذا الرقم وهذا العنوان كما هما تماماً في إجابتك — لا تعيد "
-    "صياغتهما ولا تخترع عنواناً أبداً.\n"
-    "4. أجب مباشرة على السؤال من خلال شرح القاعدة المعمول بها. "
-    "اعتمد حصراً على السياق، واستشهد بالبند المعني برقمه وعنوانه "
-    "بالضبط ([ARTICLE: ... | TITRE: ...]), donne les détails importants "
-    "(conditions, délais, pourcentages). Ne réponds JAMAIS uniquement avec "
-    "le titre de l'article.\n"
-    "5. إذا كانت الإجابة غير موجودة في السياق، أجب حرفياً: \"عذراً، لا "
-    "تحتوي الوثائق على المعلومات اللازمة للإجابة على هذا السؤال.\"\n"
-    "6. إذا سأل المستخدم بالفرنسية، اكتب الإجابة بالفرنسية مع العنوان كما "
-    "هو موجود في le contexte.\n"
-    "7. لا تعرض أبداً JSON خام أو كتل تعليمات برمجية.\n"
-    "8. جميع المبالغ المذكورة بالدينار التونسي: اكتب «دينار» بعد أي مبلغ، "
-    "وأبداً «€» أو «يورو» ou «EUR»."
+    "أنت المساعد الرسمي لعقد التأمين \"HAYETT 2000\".\n"
+    "تعليمات الإجابة:\n"
+    "1. اللغة: أجب دائماً بالعربية بطريقة واضحة ودقيقة ومهنية.\n"
+    "2. المصدر: أجب عن السؤال اعتماداً على المعلومات الواردة في السياق المقدم.\n"
+    "3. الاستشهاد: اذكر رقم واسم الفصل المعني (مثال: **الفصل 9 - تسبيقات على العقد**).\n"
+    "4. الدقة: اشرح القاعدة المعمول بها واذكر الأرقام، النسب المئوية، الشروط أو الآجال المذكورة في النص.\n"
+    "5. المبالغ: جميع المبالغ بالدينار التونسي (اكتب «دينار»).\n"
+    "6. غياب المعلومة: فقط إذا كان السياق لا يحتوي على أي معلومة للإجابة، أجب حرفياً: "
+    "\"عذراً، لا تحتوي الوثائق على المعلومات اللازمة للإجابة على هذا السؤال.\""
 )
 
 _QA_USER = (
-    "Historique:\n{history}\n\n"
-    "Contexte:\n{context}\n\n"
+    "Contexte documentaire:\n{context}\n\n"
     "Question: {question}\n\n"
-    "Rédige la réponse dans la langue de la question."
+    "Réponse:"
+)
+
+_QA_USER_WITH_HISTORY = (
+    "Historique récent:\n{history}\n\n"
+    "Contexte documentaire:\n{context}\n\n"
+    "Question: {question}\n\n"
+    "Réponse:"
 )
 
 
-def _make_qa_prompt(lang: str):
+def _make_qa_prompt(lang: str, has_history: bool = False):
     system = _QA_SYSTEM_AR if lang == "ar" else _QA_SYSTEM_FR
+    user_tpl = _QA_USER_WITH_HISTORY if has_history else _QA_USER
     return ChatPromptTemplate.from_messages([
         ("system", system),
-        ("user", _QA_USER),
+        ("user", user_tpl),
     ])
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _trim_history(history: str) -> str:
-    """Keep only the tail of the history that fits in the budget."""
-    if len(history) <= _MAX_HISTORY_CHARS:
-        return history
-    return "...\n" + history[-_MAX_HISTORY_CHARS:]
 
 
 def _normalize_source(source) -> str:
@@ -152,6 +133,36 @@ def _normalize_source(source) -> str:
     return Path(str(source)).name
 
 
+_FOLLOW_UP_ANAPHORA = re.compile(
+    r"\b(et\s+pour|et\s+si|dans\s+ce\s+cas|dans\s+cette\s+situation|"
+    r"celui-ci|celle-ci|ceux-ci|celles-ci|son\b|sa\b|ses\b|leur\b|leurs\b|"
+    r"lui|en\b|y\b)\b|"
+    r"(وكيف|وماذا|وهل|ولماذا|وكم|في\s+هذه\s+الحالة|هذا|هذه|ذلك|تلك|له|لها|عنه|عنها)",
+    re.IGNORECASE,
+)
+
+_STANDALONE_TOPICS = re.compile(
+    r"\b(versement\s+exceptionnel|versements\s+exceptionnels|rachat\s+total|rachat\s+partiel|avance|avances|"
+    r"clause\s+bénéficiaire|bénéficiaire|bénéficiaires|garantie\s+décès|décès|"
+    r"résiliation|renonciation|délai\s+de\s+renonciation|délai\s+de\s+résiliation|"
+    r"arbitrage|frais\s+de\s+gestion|frais\s+sur\s+versement|conditions\s+générales|"
+    r"article\s+\d+|chapitre\s+\d+|dispositions)\b|"
+    r"(تسبيق|تسبقة|استرداد|تصفية|المستفيد|وفاة|إلغاء|فسخ|فصل|شروط\s+عامة)",
+    re.IGNORECASE,
+)
+
+
+def is_standalone_query(query: str) -> bool:
+    """Detect queries that are already complete standalone questions and must NOT be mutated by condensation."""
+    q = (query or "").strip()
+    if not q:
+        return True
+    # If the query explicitly mentions a clear insurance topic and does not contain relative anaphora, keep raw
+    if _STANDALONE_TOPICS.search(q) and not _FOLLOW_UP_ANAPHORA.search(q):
+        return True
+    return False
+
+
 def condense_query(query: str, history: str = "") -> str:
     """Rewrite a follow-up into a standalone, history-independent query.
 
@@ -160,20 +171,25 @@ def condense_query(query: str, history: str = "") -> str:
     follow-up text (whose meaning depends on the caller's history). Returns the
     raw query unchanged when there is no history or on any failure.
     """
-    trimmed_history = _trim_history(history)
-    if not trimmed_history.strip():
-        return query.strip()
+    q_clean = (query or "").strip()
+    if not history.strip() or not q_clean:
+        return q_clean
+    if is_standalone_query(q_clean):
+        return q_clean
     try:
         condensed = query_condenser.invoke(
-            {"query": query, "history": trimmed_history}
+            {"query": q_clean, "history": history.strip()}
         ).strip()
         # Fallback: if the model echoes back something too long or empty, use raw query.
         if not condensed or len(condensed) > 400:
-            return query.strip()
-        return condensed
+            return q_clean
+        # Strip potential wrapping quotes
+        if (condensed.startswith('"') and condensed.endswith('"')) or (condensed.startswith("'") and condensed.endswith("'")):
+            condensed = condensed[1:-1].strip()
+        return condensed or q_clean
     except Exception as e:
         logger.warning(f"[RAG] Query condensation failed, using raw query: {e}")
-        return query.strip()
+        return q_clean
 
 
 def retrieve_documents(query: str) -> List:
@@ -432,23 +448,25 @@ def _is_title_only(ans: str) -> bool:
 
 def answer_rag_question(question: str, memory: ConversationMemory, condensed_query: str = None) -> dict:
     language = detect_language(question)
-    history = memory.get_history()
-    trimmed_history = _trim_history(history)
+    # Use windowed recent history (last 1 turn) to prevent context pollution in small LLMs
+    recent_history = memory.get_history(max_turns=1, max_chars=800)
+    has_history = bool(recent_history.strip())
 
-    retrieval = retrieve_context(question, history=trimmed_history, condensed_query=condensed_query)
+    retrieval = retrieve_context(question, history=recent_history, condensed_query=condensed_query)
 
     if not retrieval["context"].strip():
         answer = _no_answer(language)
     else:
-        qa_chain = _make_qa_prompt(language) | llm_client | StrOutputParser()
+        qa_chain = _make_qa_prompt(language, has_history=has_history) | llm_client | StrOutputParser()
         try:
-            answer = qa_chain.invoke(
-                {
-                    "question": question,
-                    "context": retrieval["context"],
-                    "history": trimmed_history,
-                }
-            ).strip()
+            inputs = {
+                "question": question,
+                "context": retrieval["context"],
+            }
+            if has_history:
+                inputs["history"] = recent_history
+
+            answer = qa_chain.invoke(inputs).strip()
             # Guard: if the model returns an empty string, use the fallback.
             if not answer:
                 answer = _no_answer(language)
@@ -457,21 +475,18 @@ def answer_rag_question(question: str, memory: ConversationMemory, condensed_que
                 logger.warning(f"[RAG] Title-only answer detected, retrying for: {question!r}")
                 retry_system = (
                     _QA_SYSTEM_FR
-                    + "\n9. Ta réponse précédente était uniquement le titre. Réécris une réponse COMPLÈTE en expliquant la règle, toujours avec le titre exact."
+                    + "\n7. Ta réponse précédente était uniquement le titre. Réécris une réponse COMPLÈTE en expliquant la règle, toujours avec le titre exact."
                 ) if language != "ar" else (
                     _QA_SYSTEM_AR
-                    + "\n9. Ta réponse précédente était uniquement le titre. Réécris une réponse COMPLÈTE en expliquant la règle, toujours avec le titre exact."
+                    + "\n7. Ta réponse précédente était uniquement le titre. Réécris une réponse COMPLÈTE en expliquant la règle, toujours avec le titre exact."
                 )
+                retry_user = _QA_USER_WITH_HISTORY if has_history else _QA_USER
                 retry_prompt = ChatPromptTemplate.from_messages([
                     ("system", retry_system),
-                    ("user", _QA_USER),
+                    ("user", retry_user),
                 ])
                 try:
-                    retry = (retry_prompt | llm_client | StrOutputParser()).invoke({
-                        "question": question,
-                        "context": retrieval["context"],
-                        "history": trimmed_history,
-                    }).strip()
+                    retry = (retry_prompt | llm_client | StrOutputParser()).invoke(inputs).strip()
                     if retry and not _is_title_only(retry):
                         answer = retry
                     else:
